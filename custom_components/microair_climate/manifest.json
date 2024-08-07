@@ -1,0 +1,14 @@
+{
+  "domain": "microair_climate",
+  "name": "MicroAir_EasyTouch",
+  "codeowners": ["@HRFrazier"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.home-assistant.io/integrations/microair_climate",
+  "homekit": {},
+  "iot_class": "local_polling",
+  "loggers": ["microair"],
+  "requirements": [],
+  "ssdp": [],
+  "zeroconf": []
+}
