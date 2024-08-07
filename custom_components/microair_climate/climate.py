@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -73,6 +74,9 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
         """Initialize the thermostat."""
         super().__init__(coordinator, config)
         self._attr_unique_id = config.entry_id
+        self._taskhandle_delayed_update = asyncio.create_task(
+            self._async_desired_setpoint_push_delayed(True)
+        )
         # self._mode_map = {
         #     HVACMode.HEAT: self.coordinator.MODE_HEAT,
         #     HVACMode.COOL: self.coordinator.MODE_COOL,
@@ -153,7 +157,11 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
         """Set a new target temperature."""
         temperature = kwargs.get(ATTR_TEMPERATURE)
         await self.coordinator.async_set_setpoint(temperature)
-        self.schedule_update_ha_state(force_refresh=True)
+        if self._taskhandle_delayed_update.done():
+            _LOGGER.info("Triggering an update for %s", self.name)
+            self._taskhandle_delayed_update = asyncio.create_task(
+                self._async_desired_setpoint_push_delayed(True)
+            )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
@@ -169,4 +177,13 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target operation mode."""
         await self.coordinator.async_set_hvac_mode(hvac_mode)
+        self.schedule_update_ha_state(force_refresh=True)
+
+    async def _async_desired_setpoint_push_delayed(self, actually_run):
+        """Wait for coordinator to push setpoint before updating from the thermostat."""
+        if not actually_run:
+            return
+        while self.coordinator.setpoint_update_push_pending:
+            await asyncio.sleep(0.5)
+        _LOGGER.info("Triggering an update for %s", self.name)
         self.schedule_update_ha_state(force_refresh=True)

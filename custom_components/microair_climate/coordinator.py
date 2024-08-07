@@ -75,16 +75,22 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
             url = "http://" + self._ip_addr + "/Transmission"
             final_cmd = cmd_string.replace("xx", self._my_network_id)
             resp = await self._session.post(url, data=final_cmd)
-
             if resp.status != 200:
-                # _LOGGER.error(f"{resp.url} returned {resp.status}")
                 self.last_update_success = False
                 return False
 
-            # x = await resp.content.read()
-            # content = x.decode("utf8")
+            x = await resp.content.read()
+            content = x.decode("utf8")
             # print(content)
-            self.last_update_success = True
+            success = "<X>OK</X>" in content
+            if success:
+                self.last_update_success = True
+                _LOGGER.info(
+                    "Successfully sent command %s to %s at device ID %s",
+                    final_cmd,
+                    self.name,
+                    self._my_network_id,
+                )
         except (OSError, RequestException) as ex:
             raise update_coordinator.UpdateFailed(
                 f"Exception during MicroAir Climate info update: {ex}"
@@ -92,13 +98,15 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
 
     async def _async_update_data(self) -> None:
         """Update the state."""
+        _LOGGER.info("Updating state for %s", self.name)
         try:
             url = "http://" + self._ip_addr + "/ShortStatus"
             resp = await self._session.post(url)
 
             if resp.status != 200:
-                # _LOGGER.error(f"{resp.url} returned {resp.status}")
                 self.last_update_success = False
+                return
+
             x = await resp.content.read()
             content = x.decode("utf8")
             # print(content)
@@ -268,3 +276,8 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
 
         command = Commands.COMMAND_SET_SETPOINT_PREFIX + f"{self._setpoint:x}"
         await self._async_transmit_data(command)
+
+    @property
+    def setpoint_update_push_pending(self):
+        """Return the state of the setpoint command wait/push."""
+        return not self._handle_setpoint_sync.done()
