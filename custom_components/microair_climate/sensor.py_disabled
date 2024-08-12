@@ -1,0 +1,111 @@
+"""Representation of Venstar sensors."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
+from . import MicroAirEntity
+from .const import DOMAIN
+from .coordinator import MicroAirCoordinatorHub
+
+LINE_VOLTAGE = "line_voltage"
+
+
+@dataclass(frozen=True, kw_only=True)
+class MicroAirSensorEntityDescription(SensorEntityDescription):
+    """Base description of a Sensor entity."""
+
+    value_fn: Callable[[MicroAirCoordinatorHub, str], Any]
+    name_fn: Callable[[str], str] | None
+    uom_fn: Callable[[Any], str | None]
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up MicroAir device sensors based on a config entry."""
+    coordinator: MicroAirCoordinatorHub = hass.data[DOMAIN][config_entry.entry_id]
+    entities: list[Entity] = []
+
+    # This needs to be fixed to support more sensors
+    if sensors := coordinator.get_sensor_list():
+        for sensor_name in sensors:
+            entities.extend(
+                [
+                    MicroAirSensor(coordinator, config_entry, description, sensor_name)
+                    for description in SENSOR_ENTITIES
+                    if coordinator.line_voltage() is not None
+                ]
+            )
+
+    if entities:
+        async_add_entities(entities)
+
+
+# def temperature_unit(coordinator: MicroAirCoordinatorHub) -> str:
+#     """Return the correct unit for temperature."""
+#     unit = UnitOfTemperature.CELSIUS
+#     if coordinator.client.tempunits == coordinator.client.TEMPUNITS_F:
+#         unit = UnitOfTemperature.FAHRENHEIT
+#     return unit
+
+
+class MicroAirSensor(MicroAirEntity, SensorEntity):
+    """Base class for a Venstar sensor."""
+
+    def __init__(
+        self,
+        coordinator: MicroAirCoordinatorHub,
+        config: ConfigEntry,
+        entity_description: MicroAirSensorEntityDescription,
+        sensor_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, config)
+        self.entity_description = entity_description
+        self.sensor_name = sensor_name
+        if entity_description.name_fn:
+            self._attr_name = entity_description.name_fn(sensor_name)
+        self._config = config
+
+    @property
+    def unique_id(self):
+        """Return the unique id."""
+        return f"{self._config.entry_id}_{self.sensor_name.replace(' ', '_')}_{self.entity_description.key}"
+
+    @property
+    def native_value(self) -> int:
+        """Return state of the sensor."""
+        return self.entity_description.value_fn(self.coordinator, self.sensor_name)
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return unit of measurement the value is expressed in."""
+        return self.entity_description.uom_fn(self.coordinator)
+
+
+SENSOR_ENTITIES: tuple[MicroAirSensorEntityDescription, ...] = (
+    MicroAirSensorEntityDescription(
+        key="voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        uom_fn=lambda _: LINE_VOLTAGE,
+        value_fn=lambda coordinator: coordinator.line_voltage(),
+        name_fn=lambda sensor_name: f"{sensor_name} Line Voltage",
+    )
+)

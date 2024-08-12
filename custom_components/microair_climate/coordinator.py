@@ -45,6 +45,7 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
         self._session = async_get_clientsession(hass)
 
         # Setup properties
+        self._line_voltage = 240
         self._hvac_mode = HVACMode.OFF
         self._hvac_action = HVACAction.IDLE
         self._fan_state = FAN_OFF
@@ -157,6 +158,11 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
         """Get the humidity reading."""
         return self._current_humidity
 
+    @property
+    def line_voltage(self):
+        """Return the line voltage."""
+        return self._line_voltage
+
     async def async_set_fan_mode(self, mode: str):
         """Set the fan mode, transmit update."""
         return
@@ -178,10 +184,13 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
         """Parse out xml and map properties."""
         xml = fromstring(x)
         data0 = xml[0].text
+        data1 = xml[1].text
         # Get setpoint and temp
         self._setpoint = int(data0[16:18], 16)
         self._current_temp = int(data0[18:20], 16)
-
+        self._line_voltage = int(data1[10:14], 16)
+        # self._outside_temp = int(data0[])
+        # print(self._line_voltage)
         # critical step. The thermostats talk to each other and assign a "Bus id"
         # or device id, between each other.
         self._my_network_id = data0[4:6]
