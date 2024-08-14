@@ -10,5 +10,6 @@
   "loggers": ["microair"],
   "requirements": [],
   "ssdp": [],
-  "zeroconf": []
+  "zeroconf": [],
+  "version": "0.1"
 }
