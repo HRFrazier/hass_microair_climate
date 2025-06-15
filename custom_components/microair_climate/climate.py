@@ -12,8 +12,8 @@ from homeassistant.components.climate import (
     FAN_LOW,
     FAN_MEDIUM,
     FAN_OFF,
+    FAN_ON,
     PRECISION_WHOLE,
-    STATE_ON,
     ClimateEntity,
     ClimateEntityFeature,
     HVACAction,
@@ -165,7 +165,7 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
-        if fan_mode == STATE_ON:
+        if fan_mode == FAN_ON:
             success = await self._coordinator.async_set_fan_mode(FAN_HIGH)
         else:
             success = await self._coordinator.async_set_fan_mode(FAN_AUTO)
