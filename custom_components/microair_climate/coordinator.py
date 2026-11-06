@@ -1,12 +1,12 @@
 """MicroAir Data Coordinator."""
 
-import asyncio.timeouts
-import datetime
-from datetime import timedelta
-import logging
+from __future__ import annotations
 
+import logging
+from xml.etree.ElementTree import ParseError
+
+from aiohttp import ClientError
 from defusedxml.ElementTree import fromstring
-from requests import RequestException
 
 from homeassistant.components.climate import (
     FAN_AUTO,
@@ -18,33 +18,50 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import update_coordinator
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import Commands
+from .api import MicroAirApi
+from .const import SETPOINT_DEBOUNCE_SECONDS, UPDATE_INTERVAL, Commands
 
 _LOGGER = logging.getLogger(__name__)
 
+type MicroAirConfigEntry = ConfigEntry[MicroAirCoordinatorHub]
 
-class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
-    """Implementation of API."""
+HVAC_MODE_COMMANDS = {
+    HVACMode.OFF: Commands.COMMAND_SET_HVAC_MODE_OFF,
+    HVACMode.COOL: Commands.COMMAND_SET_HVAC_MODE_COOL,
+    HVACMode.HEAT: Commands.COMMAND_SET_HVAC_MODE_HEAT,
+    HVACMode.AUTO: Commands.COMMAND_SET_HVAC_MODE_AUTO,
+    HVACMode.DRY: Commands.COMMAND_SET_HVAC_MODE_DRY,
+}
 
-    def __init__(self, hass: HomeAssistant, ip_address: str, name: str) -> None:
+
+class MicroAirCoordinatorHub(DataUpdateCoordinator[None]):
+    """Polls the thermostat and holds its decoded state."""
+
+    config_entry: MicroAirConfigEntry
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: MicroAirConfigEntry,
+        api: MicroAirApi,
+    ) -> None:
         """Initialize."""
         super().__init__(
             hass,
             _LOGGER,
-            name=name,
-            update_interval=timedelta(seconds=30),
+            config_entry=config_entry,
+            name=config_entry.data[CONF_NAME],
+            update_interval=UPDATE_INTERVAL,
         )
+        self.api = api
 
-        self.last_update_success = False
-
-        self._ip_addr = ip_address
-        self._session = async_get_clientsession(hass)
-
-        # Setup properties
         self._line_voltage = 240
         self._hvac_mode = HVACMode.OFF
         self._hvac_action = HVACAction.IDLE
@@ -55,147 +72,112 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
         self._current_humidity = 0
         self._my_network_id = ""
 
-        self._next_setpoint_sync = datetime.datetime.now()
-        self._handle_setpoint_sync = asyncio.create_task(
-            self._async_desired_setpoint_push_delayed(False)
+        self._setpoint_pending = False
+        self._setpoint_debouncer = Debouncer(
+            hass,
+            _LOGGER,
+            cooldown=SETPOINT_DEBOUNCE_SECONDS,
+            immediate=False,
+            function=self._async_push_setpoint,
         )
 
-    async def test_connection(self, ip_addr: str):
-        """Test the connection to the thermostat by posting to get the status."""
-        url = "http://" + ip_addr + "/ShortStatus"
+    async def async_shutdown(self) -> None:
+        """Cancel any pending setpoint push."""
+        await super().async_shutdown()
+        self._setpoint_debouncer.async_cancel()
 
-        resp = await self._session.post(url)
-        if resp.status != 200:
-            self.last_update_success = False
-            return False
-
-        return True
-
-    async def _async_transmit_data(self, cmd_string):
+    async def _async_transmit_data(self, cmd_string: str) -> None:
+        final_cmd = cmd_string.replace("xx", self._my_network_id)
         try:
-            url = "http://" + self._ip_addr + "/Transmission"
-            final_cmd = cmd_string.replace("xx", self._my_network_id)
-            resp = await self._session.post(url, data=final_cmd)
-            if resp.status != 200:
-                self.last_update_success = False
-                return False
-
-            x = await resp.content.read()
-            content = x.decode("utf8")
-            # print(content)
-            success = "<X>OK</X>" in content
-            if success:
-                self.last_update_success = True
-                _LOGGER.info(
-                    "Successfully sent command %s to %s at device ID %s",
-                    final_cmd,
-                    self.name,
-                    self._my_network_id,
-                )
-        except (OSError, RequestException) as ex:
-            raise update_coordinator.UpdateFailed(
-                f"Exception during MicroAir Climate info update: {ex}"
+            success = await self.api.async_transmit(final_cmd)
+        except (ClientError, TimeoutError) as ex:
+            raise HomeAssistantError(
+                f"Error sending command to {self.name}: {ex}"
             ) from ex
+        if not success:
+            raise HomeAssistantError(f"{self.name} did not acknowledge {final_cmd}")
+        _LOGGER.debug(
+            "Successfully sent command %s to %s at device ID %s",
+            final_cmd,
+            self.name,
+            self._my_network_id,
+        )
 
     async def _async_update_data(self) -> None:
-        """Update the state."""
-        _LOGGER.info("Updating state for %s", self.name)
+        """Fetch and decode the thermostat state."""
         try:
-            url = "http://" + self._ip_addr + "/ShortStatus"
-            resp = await self._session.post(url)
+            content = await self.api.async_get_status()
+        except (ClientError, TimeoutError) as ex:
+            raise UpdateFailed(f"Error communicating with {self.name}: {ex}") from ex
 
-            if resp.status != 200:
-                self.last_update_success = False
-                return
-
-            x = await resp.content.read()
-            content = x.decode("utf8")
-            # print(content)
-            await self.update_data_from_xml(content)
-            self.last_update_success = True
-
-        except (OSError, RequestException) as ex:
-            raise update_coordinator.UpdateFailed(
-                f"Exception during MicroAir Climate info update: {ex}"
-            ) from ex
-
-    async def force_update(self):
-        """Update immediately."""
-        await self._async_update_data()
+        try:
+            self._update_data_from_xml(content)
+        except (ParseError, IndexError, TypeError, ValueError) as ex:
+            raise UpdateFailed(f"Unexpected status payload from {self.name}") from ex
 
     @property
-    def hvac_mode(self):
+    def hvac_mode(self) -> HVACMode:
         """Get the mode of the thermostat."""
         return self._hvac_mode
 
     @property
-    def fan_mode(self):
-        """Get the mode of the thermostat."""
+    def fan_mode(self) -> str:
+        """Get the fan mode of the thermostat."""
         return self._fan_mode
 
     @property
-    def setpoint(self):
-        """Get the mode of the thermostat."""
+    def setpoint(self) -> int:
+        """Get the setpoint of the thermostat."""
         return self._setpoint
 
     @property
-    def fanstate(self):
-        """Get the mode of the thermostat."""
+    def fanstate(self) -> str:
+        """Get the fan speed of the thermostat."""
         return self._fan_state
 
     @property
-    def hvac_action(self):
+    def hvac_action(self) -> HVACAction:
         """Get the run state of the thermostat."""
         return self._hvac_action
 
     @property
-    def indoor_temp(self):
+    def indoor_temp(self) -> int:
         """Get the temperature reading."""
         return self._current_temp
 
     @property
-    def indoor_humidity(self):
+    def indoor_humidity(self) -> int:
         """Get the humidity reading."""
         return self._current_humidity
 
     @property
-    def line_voltage(self):
+    def line_voltage(self) -> int:
         """Return the line voltage."""
         return self._line_voltage
 
-    async def async_set_fan_mode(self, mode: str):
+    async def async_set_fan_mode(self, mode: str) -> bool:
         """Set the fan mode, transmit update."""
-        return
+        return False
 
-    async def async_set_hvac_mode(self, mode: HVACMode):
+    async def async_set_hvac_mode(self, mode: HVACMode) -> None:
         """Make http call and set mode."""
-        if mode == HVACMode.OFF:
-            await self._async_transmit_data(Commands.COMMAND_SET_HVAC_MODE_OFF)
-        elif mode == HVACMode.COOL:
-            await self._async_transmit_data(Commands.COMMAND_SET_HVAC_MODE_COOL)
-        elif mode == HVACMode.HEAT:
-            await self._async_transmit_data(Commands.COMMAND_SET_HVAC_MODE_HEAT)
-        elif mode == HVACMode.AUTO:
-            await self._async_transmit_data(Commands.COMMAND_SET_HVAC_MODE_AUTO)
-        elif mode == HVACMode.DRY:
-            await self._async_transmit_data(Commands.COMMAND_SET_HVAC_MODE_DRY)
+        if command := HVAC_MODE_COMMANDS.get(mode):
+            await self._async_transmit_data(command)
 
-    async def update_data_from_xml(self, x):
+    def _update_data_from_xml(self, x: str) -> None:
         """Parse out xml and map properties."""
         xml = fromstring(x)
         data0 = xml[0].text
         data1 = xml[1].text
         # Get setpoint and temp
-        self._setpoint = int(data0[16:18], 16)
+        if not self._setpoint_pending:
+            self._setpoint = int(data0[16:18], 16)
         self._current_temp = int(data0[18:20], 16)
         self._line_voltage = int(data1[10:14], 16)
         # self._outside_temp = int(data0[])
-        # print(self._line_voltage)
         # critical step. The thermostats talk to each other and assign a "Bus id"
         # or device id, between each other.
         self._my_network_id = data0[4:6]
-
-        # print("Setpoint: %2d, Current Temp: %2d" % (self._setpoint, self._current_temp))
 
         controlMode = int(data0[11:13], 16)
         if controlMode == 0:
@@ -215,7 +197,7 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
         # fanstate = bool(statusBits & 0b100)
 
         if self._hvac_mode == HVACMode.OFF:
-            self._hvac_action = HVACMode.OFF
+            self._hvac_action = HVACAction.OFF
         elif self._hvac_mode == HVACMode.COOL:
             if compressorStatus:
                 self._hvac_action = HVACAction.COOLING
@@ -264,29 +246,18 @@ class MicroAirCoordinatorHub(update_coordinator.DataUpdateCoordinator[None]):
             self._fan_state = FAN_HIGH
             self._fan_mode = FAN_AUTO
 
-    async def async_set_setpoint(self, setpoint):
-        """Set the setpoint."""
-        # Convert setpoint to hex and transmit setting string.
+    async def async_set_setpoint(self, setpoint: float) -> None:
+        """Store the setpoint and push it once the user stops adjusting it."""
         self._setpoint = int(setpoint)
-        self._next_setpoint_sync = datetime.datetime.now() + timedelta(seconds=2)
-        if self._handle_setpoint_sync.done():
-            self._handle_setpoint_sync = asyncio.create_task(
-                self._async_desired_setpoint_push_delayed(True)
+        self._setpoint_pending = True
+        await self._setpoint_debouncer.async_call()
+
+    async def _async_push_setpoint(self) -> None:
+        """Send the setpoint to the thermostat and refresh its state."""
+        try:
+            await self._async_transmit_data(
+                Commands.COMMAND_SET_SETPOINT_PREFIX + f"{self._setpoint:x}"
             )
-        return True
-
-    async def _async_desired_setpoint_push_delayed(self, actually_run):
-        """Wait to send the setpoint to the thermostat in case user is pressing the plus or minus buttons."""
-        if not actually_run:
-            return
-
-        while datetime.datetime.now() <= self._next_setpoint_sync:
-            await asyncio.sleep(0.5)
-
-        command = Commands.COMMAND_SET_SETPOINT_PREFIX + f"{self._setpoint:x}"
-        await self._async_transmit_data(command)
-
-    @property
-    def setpoint_update_push_pending(self):
-        """Return the state of the setpoint command wait/push."""
-        return not self._handle_setpoint_sync.done()
+        finally:
+            self._setpoint_pending = False
+        await self.async_request_refresh()

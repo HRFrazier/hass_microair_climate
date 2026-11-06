@@ -6,6 +6,7 @@ from enum import StrEnum
 DOMAIN = "microair_climate"
 REQUEST_TIMEOUT = 5
 UPDATE_INTERVAL = timedelta(seconds=30)
+SETPOINT_DEBOUNCE_SECONDS = 2
 
 ATTR_FAN_STATE = "fan_state"
 ATTR_HVAC_STATE = "hvac_state"
