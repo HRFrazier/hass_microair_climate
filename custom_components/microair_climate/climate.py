@@ -50,7 +50,7 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
     _attr_name = None
     _attr_min_temp = 70
     _attr_max_temp = 85
-    _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
+    _attr_native_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.FAN_MODE
@@ -64,7 +64,7 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
         self._attr_unique_id = coordinator.config_entry.entry_id
 
     @property
-    def current_temperature(self) -> int:
+    def native_current_temperature(self) -> int:
         """Return the current temperature."""
         return self.coordinator.indoor_temp
 
@@ -97,7 +97,7 @@ class MicroAirThermostat(MicroAirEntity, ClimateEntity):
         }
 
     @property
-    def target_temperature(self) -> int:
+    def native_target_temperature(self) -> int:
         """Return the target temperature we try to reach."""
         return self.coordinator.setpoint
 
